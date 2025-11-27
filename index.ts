@@ -1,102 +1,117 @@
 import { generateSolanaVanityKeypair } from "./generate";
-import { MongoClient } from 'mongodb';
+import { Db, MongoClient } from "mongodb";
 
-const MONGO_URI = ""
+const {
+  MONGO_URI = "",
+  MONGO_DB = "metafresh",
+  MONGO_COLLECTION = "pumpaddr",
+  VANITY_PREFIX,
+  VANITY_SUFFIX = "pump",
+  VANITY_TIMEOUT_SECONDS = "600",
+  VANITY_CORES = "20",
+} = process.env;
 
-// MongoDB connection
-let client: MongoClient;
-let db: any;
+if (!MONGO_URI) {
+  throw new Error("MONGO_URI is required. Set it in your environment variables.");
+}
 
-async function connectToMongoDB() {
+let client: MongoClient | null = null;
+let db: Db | null = null;
+
+async function connectToMongoDB(): Promise<Db> {
+  if (db) {
+    return db;
+  }
+
   try {
-    client = new MongoClient(MONGO_URI);
+    client = new MongoClient(MONGO_URI, { maxPoolSize: 5 });
     await client.connect();
-    db = client.db('metafresh');
-    console.log('✅ Connected to MongoDB');
+    db = client.db(MONGO_DB);
+    console.log(`✅ Connected to MongoDB database "${MONGO_DB}"`);
+    return db;
   } catch (error) {
-    console.error('❌ MongoDB connection error:', error);
+    console.error("❌ MongoDB connection error:", error);
     throw error;
   }
 }
 
+async function closeMongoConnection() {
+  if (!client) {
+    return;
+  }
+
+  await client.close();
+  client = null;
+  db = null;
+  console.log("✅ MongoDB connection closed");
+}
+
 async function saveAddressToDB(publicKey: string, privateKey: string) {
+  const database = await connectToMongoDB();
+
   try {
-    const collection = db.collection('pumpaddr');
+    const collection = database.collection(MONGO_COLLECTION);
     const addressData = {
       publicKey,
       privateKey,
       isActive: false,
       createdAt: new Date(),
-      suffix: 'pump'
+      suffix: VANITY_SUFFIX,
     };
-    
+
     const result = await collection.insertOne(addressData);
     console.log(`💾 Address saved to DB with ID: ${result.insertedId}`);
     return result;
   } catch (error) {
-    console.error('❌ Error saving to database:', error);
+    console.error("❌ Error saving to database:", error);
     throw error;
   }
 }
 
-async function main() {
-  // Connect to MongoDB first
-  await connectToMongoDB();
-  
+async function runGeneratorLoop() {
   let addressCount = 0;
-  
-  while (true) {
+
+  for (;;) {
     try {
-      addressCount++;
+      addressCount += 1;
       console.log(`\n=== Generating address #${addressCount} ===`);
-      
+
       const result = await generateSolanaVanityKeypair({
-        // prefix: 'ABC',
-        suffix: 'pump',
-        timeoutSeconds: 600,
-        cores: 20
+        prefix: VANITY_PREFIX,
+        suffix: VANITY_SUFFIX,
+        timeoutSeconds: Number(VANITY_TIMEOUT_SECONDS),
+        cores: Number(VANITY_CORES),
       });
-      
-      console.log(`✅ Address #${addressCount} generated:`, result);
+
+      console.log(`✅ Address #${addressCount} generated`);
       console.log(`Public Key: ${result.publicKey}`);
-      console.log(`Private Key: ${result.privateKey}`);
-      
-      // Save to MongoDB
+
+      // Avoid logging private keys in production; uncomment only for debugging.
+      // console.log(`Private Key: ${result.privateKey}`);
+
       await saveAddressToDB(result.publicKey, result.privateKey);
-      
-      // Optional: Add a small delay between generations
-      // await new Promise(resolve => setTimeout(resolve, 1000));
-      
-    } catch (error: any) {
-      console.error(`❌ Error generating address #${addressCount}:`, error.message);
-      // Continue to next iteration instead of breaking
+    } catch (error) {
+      console.error(`❌ Error generating address #${addressCount}:`, (error as Error).message);
     }
   }
 }
 
-// Graceful shutdown handling
-process.on('SIGINT', async () => {
-  console.log('\n🛑 Shutting down gracefully...');
-  if (client) {
-    await client.close();
-    console.log('✅ MongoDB connection closed');
-  }
-  process.exit(0);
-});
+async function main() {
+  await connectToMongoDB();
+  await runGeneratorLoop();
+}
 
-process.on('SIGTERM', async () => {
-  console.log('\n🛑 Shutting down gracefully...');
-  if (client) {
-    await client.close();
-    console.log('✅ MongoDB connection closed');
-  }
+async function handleShutdown(signal: string) {
+  console.log(`\n🛑 Received ${signal}. Shutting down gracefully...`);
+  await closeMongoConnection();
   process.exit(0);
-});
+}
+
+process.once("SIGINT", () => void handleShutdown("SIGINT"));
+process.once("SIGTERM", () => void handleShutdown("SIGTERM"));
 
 main().catch(async (error) => {
-  console.error('❌ Fatal error:', error);
-  if (client) {
-    await client.close();
-  }
+  console.error("❌ Fatal error:", error);
+  await closeMongoConnection();
   process.exit(1);
 });
