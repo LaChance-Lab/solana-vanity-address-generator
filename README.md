@@ -1,2 +1,2 @@
-# solana-vanity-address-generator
-Solana Vanity Address Generator
+# Solana Vanity Address Generator
+Generating Vanity Address and Saving it to MongoDB
